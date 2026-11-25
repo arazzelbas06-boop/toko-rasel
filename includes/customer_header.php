@@ -1,0 +1,5 @@
+<?php
+require_customer();
+function customer_nav($file, $label, $cur) { echo '<a class="' . ($cur === $file ? 'active' : '') . '" href="' . $file . '">' . $label . '</a>'; }
+$cur = basename($_SERVER['PHP_SELF']);
+?><!DOCTYPE html><html lang="id"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title><?= e($title ?? 'Belanja') ?> - TokoKu</title><link rel="stylesheet" href="assets/style.css?v=<?= (int) @filemtime(__DIR__ . '/../assets/style.css') ?>"></head><body><header class="topbar customer-bar"><div class="brand-wrap"><div class="brand">Toko<span>Ku</span></div><span class="brand-caption">CUSTOMER SHOP</span></div><nav><?php customer_nav('belanja.php', 'Belanja', $cur); ?></nav><div class="account"><span class="avatar"><?= e(strtoupper(substr($_SESSION['customer']['nama'], 0, 1))) ?></span><span class="account-name"><?= e($_SESSION['customer']['nama']) ?></span><a class="logout" href="logout.php">Keluar</a></div></header><main class="container">
