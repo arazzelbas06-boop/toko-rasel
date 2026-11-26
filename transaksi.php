@@ -44,9 +44,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$errors) {
             try {
                 $proof = save_payment_proof($_FILES['bukti_pembayaran'] ?? null, $paymentMethod);
+                $notaId = 'NT' . date('ymdHis') . random_int(100, 999);
                 $pdo->beginTransaction();
-                $insert = $pdo->prepare('INSERT INTO transaksi (id_pelanggan, tanggal, nama_barang, jumlah, harga_satuan, total, metode_pembayaran, bukti_pembayaran) VALUES (?, CURDATE(), ?, ?, ?, ?, ?, ?)');
-                foreach ($cart as $item) $insert->execute([$customer, $item['nama_barang'], $item['jumlah'], $item['harga_satuan'], $item['harga_satuan'] * $item['jumlah'], $paymentMethod, $proof]);
+                $insert = $pdo->prepare('INSERT INTO transaksi (id_pelanggan, nomor_nota, tanggal, nama_barang, jumlah, harga_satuan, total, metode_pembayaran, bukti_pembayaran) VALUES (?, ?, CURDATE(), ?, ?, ?, ?, ?, ?)');
+                foreach ($cart as $item) $insert->execute([$customer, $notaId, $item['nama_barang'], $item['jumlah'], $item['harga_satuan'], $item['harga_satuan'] * $item['jumlah'], $paymentMethod, $proof]);
                 $pdo->commit();
                 $customerName = $pdo->prepare('SELECT nama FROM pelanggan WHERE id_pelanggan = ?'); $customerName->execute([$customer]);
                 $_SESSION['checkout_receipt'] = ['number' => date('YmdHis'), 'date' => date('d/m/Y H:i'), 'customer' => $customerName->fetchColumn() ?: 'Pelanggan umum', 'items' => $cart, 'total' => $cartTotal, 'payment' => $payment, 'change' => $payment - $cartTotal];
@@ -76,10 +77,12 @@ $params = [];
 if ($dari !== '')   { $where[] = 't.tanggal >= ?'; $params[] = $dari; }
 if ($sampai !== '') { $where[] = 't.tanggal <= ?'; $params[] = $sampai; }
 if ($idp)           { $where[] = 't.id_pelanggan = ?'; $params[] = $idp; }
-$sql = 'SELECT t.id_transaksi, t.tanggal, p.nama AS nama_pelanggan, t.nama_barang, t.jumlah, t.harga_satuan, t.total
-        FROM transaksi t JOIN pelanggan p ON p.id_pelanggan = t.id_pelanggan'
+$sql = "SELECT MIN(t.id_transaksi) AS id_transaksi, MAX(t.tanggal) AS tanggal, p.nama AS nama_pelanggan,
+        GROUP_CONCAT(CONCAT(t.nama_barang, ' x', t.jumlah) ORDER BY t.id_transaksi SEPARATOR ', ') AS nama_barang,
+        SUM(t.jumlah) AS jumlah, SUM(t.total) AS total
+        FROM transaksi t JOIN pelanggan p ON p.id_pelanggan = t.id_pelanggan"
      . ($where ? ' WHERE ' . implode(' AND ', $where) : '')
-     . ' ORDER BY t.tanggal DESC, t.id_transaksi DESC';
+     . ' GROUP BY COALESCE(NULLIF(t.nomor_nota, \'\'), NULLIF(t.duitku_order_id, \'\'), CONCAT(\'TRX-\', t.id_transaksi)), t.id_pelanggan, p.nama ORDER BY MAX(t.tanggal) DESC, MIN(t.id_transaksi) DESC';
 $st = $pdo->prepare($sql);
 $st->execute($params);
 $rows = $st->fetchAll();
