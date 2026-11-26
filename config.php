@@ -87,12 +87,19 @@ try {
     // Kolom pembayaran dibuat otomatis untuk mendukung QRIS dan bukti transfer.
     foreach ([
         'id_petugas' => "ALTER TABLE transaksi ADD id_petugas INT UNSIGNED NULL AFTER id_pelanggan",
-        'metode_pembayaran' => "ALTER TABLE transaksi ADD metode_pembayaran ENUM('tunai','qris') NOT NULL DEFAULT 'tunai' AFTER total",
+        'metode_pembayaran' => "ALTER TABLE transaksi ADD metode_pembayaran ENUM('tunai','qris','duitku') NOT NULL DEFAULT 'tunai' AFTER total",
         'bukti_pembayaran' => "ALTER TABLE transaksi ADD bukti_pembayaran VARCHAR(255) DEFAULT NULL AFTER metode_pembayaran",
         'status_pesanan' => "ALTER TABLE transaksi ADD status_pesanan ENUM('pending','diproses','dikirim','selesai','dibatalkan') NOT NULL DEFAULT 'selesai' AFTER total",
+        'duitku_order_id' => "ALTER TABLE transaksi ADD duitku_order_id VARCHAR(50) DEFAULT NULL AFTER bukti_pembayaran",
+        'duitku_reference' => "ALTER TABLE transaksi ADD duitku_reference VARCHAR(100) DEFAULT NULL AFTER duitku_order_id",
+        'duitku_status' => "ALTER TABLE transaksi ADD duitku_status VARCHAR(30) DEFAULT NULL AFTER duitku_reference",
+        'duitku_paid_at' => "ALTER TABLE transaksi ADD duitku_paid_at DATETIME DEFAULT NULL AFTER duitku_status",
+        'nomor_nota' => "ALTER TABLE transaksi ADD nomor_nota VARCHAR(50) DEFAULT NULL AFTER id_transaksi",
     ] as $column => $alter) {
         if (!$pdo->query("SHOW COLUMNS FROM transaksi LIKE '" . $column . "'")->fetch()) $pdo->exec($alter);
     }
+    $paymentDefinition = $pdo->query("SHOW COLUMNS FROM transaksi LIKE 'metode_pembayaran'")->fetch();
+    if ($paymentDefinition && strpos((string)$paymentDefinition['Type'], "'duitku'") === false) $pdo->exec("ALTER TABLE transaksi MODIFY metode_pembayaran ENUM('tunai','qris','duitku') NOT NULL DEFAULT 'tunai'");
 } catch (PDOException $e) {
     die('Koneksi database gagal: ' . htmlspecialchars($e->getMessage()) .
         '<br>Pastikan MySQL menyala dan database "toko" sudah diimpor.');
@@ -102,6 +109,39 @@ try {
 function e($s) { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
 function rupiah($n) { return 'Rp' . number_format((float)$n, 0, ',', '.'); }
+
+function duitku_config() {
+    static $config;
+    if ($config === null) $config = is_file(__DIR__ . '/duitku_config.php') ? require __DIR__ . '/duitku_config.php' : [];
+    return $config + ['merchant_code' => '', 'api_key' => '', 'base_url' => 'https://sandbox.duitku.com', 'site_url' => '', 'enabled' => false];
+}
+
+function duitku_enabled() {
+    $c = duitku_config();
+    return !empty($c['enabled']) && $c['merchant_code'] !== '' && $c['api_key'] !== '' && $c['site_url'] !== '' && function_exists('curl_init');
+}
+
+function duitku_request_payment($orderId, $amount, $productDetails, $customer) {
+    if (!duitku_enabled()) throw new RuntimeException('Duitku belum dikonfigurasi. Isi API Key di duitku_config.php.');
+    $c = duitku_config(); $amount = (int)round($amount);
+    $timestamp = (string)round(microtime(true) * 1000);
+    $payload = ['paymentAmount'=>$amount,'merchantOrderId'=>$orderId,'productDetails'=>mb_substr($productDetails,0,255),'additionalParam'=>'','merchantUserInfo'=>$customer['email'] ?: '','paymentMethod'=>'','customerVaName'=>mb_substr($customer['nama'] ?: 'Pelanggan',0,20),'email'=>$customer['email'] ?: 'customer@example.com','callbackUrl'=>rtrim($c['site_url'],'/').'/duitku_callback.php','returnUrl'=>rtrim($c['site_url'],'/').'/duitku_return.php?order='.rawurlencode($orderId),'expiryPeriod'=>60];
+    $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
+    $signature = hash_hmac('sha256', $c['merchant_code'] . $timestamp, $c['api_key']);
+    $apiBase = str_contains((string)$c['base_url'], 'sandbox') ? 'https://api-sandbox.duitku.com' : 'https://api-prod.duitku.com';
+    $ch = curl_init($apiBase . '/api/merchant/createInvoice');
+    curl_setopt_array($ch, [CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>$json,CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>30,CURLOPT_HTTPHEADER=>['Content-Type: application/json','Content-Length: '.strlen($json),'x-duitku-signature: '.$signature,'x-duitku-timestamp: '.$timestamp,'x-duitku-merchantcode: '.$c['merchant_code']]]);
+    $raw=curl_exec($ch); $error=curl_error($ch); curl_close($ch);
+    if ($raw===false || $error) throw new RuntimeException('Tidak dapat menghubungi Duitku: '.$error);
+    $response=json_decode($raw,true);
+    if (!is_array($response) || ($response['statusCode'] ?? '') !== '00' || empty($response['reference'])) throw new RuntimeException('Duitku menolak transaksi: '.($response['statusMessage'] ?? $response['Message'] ?? $raw));
+    return $response;
+}
+
+function duitku_valid_callback(array $data) {
+    $c=duitku_config(); $amount=(string)($data['amount']??''); $expected=hash_hmac('sha256',($data['merchantCode']??'').$amount.($data['merchantOrderId']??''),$c['api_key']);
+    return $amount !== '' && hash_equals(strtolower($expected),strtolower((string)($data['signature']??'')));
+}
 
 function save_payment_proof($file, $method) {
     if ($method !== 'qris') return null;
@@ -154,7 +194,7 @@ function require_cashier() {
 function admin_name() { return $_SESSION['admin']['nama'] ?? 'Administrator'; }
 
 // Semua halaman aplikasi (kecuali login/logout) wajib melewati autentikasi.
-$public_pages = ['login.php', 'logout.php', 'belanja.php'];
+$public_pages = ['login.php', 'logout.php', 'belanja.php', 'duitku_callback.php', 'duitku_return.php'];
 if (!in_array(basename($_SERVER['PHP_SELF']), $public_pages, true)) require_auth();
 
 // Menampilkan tabel. $cols = ['kolom' => 'Label'], $money = kolom berformat rupiah
@@ -178,4 +218,3 @@ function tbl(array $rows, array $cols, array $money = []) {
 function badge($kategori) {
     $cls = ['Pelanggan Gold' => 'gold', 'Pelanggan Silver' => 'silver'][$kategori] ?? 'reguler';
     return '<span class="badge ' . $cls . '">' . e($kategori) . '</span>';
-}
